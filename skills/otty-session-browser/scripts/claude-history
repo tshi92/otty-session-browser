@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Browse Claude Code sessions with fzf — meant for an Otty Details-panel view.
+#
+#   claude-history [--lang en|zh] [--days N] [DIR] [DAYS]
+#
+#   DIR    list sessions launched in DIR or below (default: $PWD); ctrl-a toggles all projects
+#   DAYS   only sessions active in the last N days (same as --days)
+#   --lang UI language; default: $CH_LANG, else zh if LANG/AppleLanguages[0] is Chinese, else en
+#
+# Keys:  enter   copy "cd <dir> && claude --resume <id>" to the clipboard
+#        ctrl-o  resume the session right here (returns to the list when claude exits)
+#        ctrl-y  copy the session id
+#        ctrl-a  toggle this folder / all projects
+#        ctrl-r  refresh
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Otty runs the view like a prompt command, but a GUI-launched environment may miss Homebrew/user bins.
+export PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/.claude/local"
+SELF="$HERE/claude-history"
+py() { python3 -I "$HERE/sessions.py" "$@"; }
+squote() { local s=${1//\'/\'\\\'\'}; printf "'%s'" "$s"; }
+
+detect_lang() {
+  local first
+  first="$(defaults read -g AppleLanguages 2>/dev/null | sed -n '2p' | tr -d ' ",')"
+  case "${LC_ALL:-${LANG:-}}:$first" in zh*|*:zh*) echo zh ;; *) echo en ;; esac
+}
+
+set_strings() {
+  if [[ $CH_LANG == zh ]]; then
+    export CH_P_LOCAL='本目录> ' CH_P_ALL='全部> '
+    S_HEADER=$'⏎ 复制恢复命令  ^O 在此恢复  ^Y 复制ID\n^A 本目录/全部  ^R 刷新'
+    S_DAYS="近 %s 天  "
+    S_COPIED='✓ 已复制恢复命令，到终端 ⌘V 回车即可'
+    S_COPIED_ID='✓ 已复制会话 ID'
+    S_NODIR='目录已不存在：'
+    S_ANYKEY='按任意键返回…'
+    S_NOFZF='需要 fzf：brew install fzf'
+  else
+    export CH_P_LOCAL='Here> ' CH_P_ALL='All> '
+    S_HEADER=$'⏎ copy resume cmd  ^O resume here  ^Y copy id\n^A here/all  ^R refresh'
+    S_DAYS="last %sd  "
+    S_COPIED='✓ Resume command copied — paste it in a terminal (⌘V, Enter)'
+    S_COPIED_ID='✓ Session id copied'
+    S_NODIR='Folder no longer exists: '
+    S_ANYKEY='Press any key to go back…'
+    S_NOFZF='fzf is required: brew install fzf'
+  fi
+}
+
+# Internal subcommands invoked from fzf bindings (CH_* is inherited from the parent).
+case "$1" in
+  __list)   # list for the mode shown in fzf's prompt
+    if [[ $FZF_PROMPT == "$CH_P_ALL" ]]; then py list --all; else py list "$CH_DIR"; fi
+    exit 0 ;;
+  __copy)   # __copy CWD ID
+    printf 'cd %s && claude --resume %s' "$(squote "$2")" "$3" | pbcopy
+    exit 0 ;;
+  __copyid)
+    printf '%s' "$2" | pbcopy
+    exit 0 ;;
+  __resume) # __resume CWD ID
+    set_strings
+    if [[ ! -d "$2" ]]; then
+      echo "$S_NODIR$2"; read -rsn1 -p "$S_ANYKEY"; exit 0
+    fi
+    cd "$2" && claude --resume "$3"
+    exit 0 ;;
+esac
+
+dir="" days="${CH_DAYS:-}" lang="${CH_LANG:-}"
+while (( $# )); do
+  case "$1" in
+    --lang) lang="$2"; shift ;;
+    --days) days="$2"; shift ;;
+    *) if [[ -z $dir ]]; then dir="$1"; else days="$1"; fi ;;
+  esac; shift
+done
+case "$lang" in zh|en) ;; *) lang="$(detect_lang)" ;; esac
+export CH_LANG="$lang" CH_DIR="${dir:-$PWD}" CH_DAYS="$days"   # inherited by every __list reload
+set_strings
+
+command -v fzf >/dev/null || { echo "$S_NOFZF"; read -rsn1; exit 1; }
+
+prompt="$CH_P_LOCAL"
+[[ -z "$(py list "$CH_DIR" | head -1)" ]] && prompt="$CH_P_ALL"
+
+header="$S_HEADER"
+[[ -n $CH_DAYS && $CH_DAYS != 0 ]] && header="$(printf "$S_DAYS" "$CH_DAYS")$S_HEADER"
+
+while true; do
+  FZF_PROMPT="$prompt" "$SELF" __list | fzf \
+    --ansi --no-sort --layout=reverse --info=inline-right \
+    --delimiter=$'\t' --with-nth=3 \
+    --prompt="$prompt" --header="$header" --header-first \
+    --preview="python3 -I '$HERE/sessions.py' preview {1}" \
+    --preview-window='down,55%,wrap,border-top' \
+    --bind="enter:execute-silent('$SELF' __copy {2} {1})+change-header:$S_COPIED" \
+    --bind="ctrl-y:execute-silent('$SELF' __copyid {1})+change-header:$S_COPIED_ID" \
+    --bind="ctrl-o:execute('$SELF' __resume {2} {1})+reload('$SELF' __list)" \
+    --bind="ctrl-r:reload('$SELF' __list)+change-header:$header" \
+    --bind="ctrl-a:transform:[[ \$FZF_PROMPT == \"\$CH_P_ALL\" ]] && echo \"change-prompt(\$CH_P_LOCAL)+reload('$SELF' __list)\" || echo \"change-prompt(\$CH_P_ALL)+reload('$SELF' __list)\"" \
+    --bind="focus:change-header:$header" \
+    --bind='esc:clear-query'
+  # fzf exits on ctrl-c / ctrl-d; keep the panel alive and restart it.
+  sleep 0.3
+done

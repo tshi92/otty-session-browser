@@ -1,0 +1,10 @@
+{
+  "name": "otty-session-browser",
+  "description": "Browse and resume past Claude Code sessions from a view in the Otty terminal's Details panel (fzf list + preview, English/Chinese UI).",
+  "version": "1.0.0",
+  "author": {
+    "name": "tshi92"
+  },
+  "license": "MIT",
+  "keywords": ["otty", "terminal", "claude-code", "sessions", "resume", "history", "fzf"]
+}

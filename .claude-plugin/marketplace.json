@@ -1,0 +1,15 @@
+{
+  "name": "otty-session-browser",
+  "description": "Marketplace for the otty-session-browser plugin",
+  "owner": {
+    "name": "tshi92"
+  },
+  "plugins": [
+    {
+      "name": "otty-session-browser",
+      "description": "Browse and resume past Claude Code sessions from a view in the Otty terminal's Details panel (fzf list + preview, English/Chinese UI).",
+      "version": "1.0.0",
+      "source": "./"
+    }
+  ]
+}
