@@ -54,7 +54,7 @@ if (( uninstall )); then
   else
     echo "No details-view id=\"$VIEW_ID\" in $CONFIG."
   fi
-  if grep -q 'views/claude-history/claude-history' "$CONFIG" 2>/dev/null && ! (( dry )); then
+  if grep -v "id=\"$VIEW_ID\"" "$CONFIG" 2>/dev/null | grep -q 'views/claude-history/claude-history'; then
     echo "Other views still use $CODE — code and cache kept."
   else
     say "remove $CODE and ~/.cache/otty-session-browser (no view uses them any more)"
@@ -66,7 +66,11 @@ fi
 for dep in fzf python3; do command -v "$dep" >/dev/null || { echo "missing dependency: $dep (brew install $dep)" >&2; exit 1; }; done
 
 say "copy sessions.py + claude-history → $CODE/"
-if (( ! dry )); then mkdir -p "$CODE"; cp "$SRC/sessions.py" "$SRC/claude-history" "$CODE/"; chmod +x "$CODE/claude-history"; fi
+if (( ! dry )); then
+  mkdir -p "$CODE"
+  # rename into place: panels and waiting terminals may be running the old files
+  for f in sessions.py claude-history; do cp "$SRC/$f" "$CODE/$f.new"; chmod +x "$CODE/$f.new"; mv -f "$CODE/$f.new" "$CODE/$f"; done
+fi
 
 if has_line; then
   echo "Config already has details-view id=\"$VIEW_ID\" — line left unchanged:"
@@ -81,7 +85,9 @@ fi
 reload
 if (( ! dry )); then
   CH_DAYS="$DAYS" python3 -I "$CODE/sessions.py" list --all | wc -l | xargs printf 'Indexed: %s sessions listed. '
-  echo "Open the Details panel (⌘⇧R) → \"$TITLE\" tab."
+  echo "Open the Details panel (⌘⇧R) → \"$TITLE\" tab. (Updating? Restart Otty: open panels keep the old script.)"
+  echo "To open sessions in a normal terminal by double-click, leave this running in a terminal tab:"
+  echo "  ~/.config/otty/views/claude-history/claude-history${UILANG:+ --lang $UILANG} --wait"
 else
   echo "[dry-run] nothing was changed."
 fi

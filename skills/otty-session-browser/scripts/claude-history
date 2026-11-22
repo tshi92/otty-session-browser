@@ -2,12 +2,16 @@
 # Browse Claude Code sessions with fzf — meant for an Otty Details-panel view.
 #
 #   claude-history [--lang en|zh] [--days N] [DIR] [DAYS]
+#   claude-history [--lang en|zh] --wait      run in an ORDINARY terminal: sessions picked in the
+#                                             panel open in that terminal
 #
 #   DIR    list sessions launched in DIR or below (default: $PWD); ctrl-a toggles all projects
 #   DAYS   only sessions active in the last N days (same as --days)
 #   --lang UI language; default: $CH_LANG, else zh if LANG/AppleLanguages[0] is Chinese, else en
 #
-# Keys:  enter   copy "cd <dir> && claude --resume <id>" to the clipboard
+# Keys:  enter / double-click
+#                 already open in a pane -> focus it; else a waiting terminal -> open it there;
+#                 else copy "cd <dir> && claude --resume <id>" to the clipboard
 #        ctrl-o  resume the session right here (returns to the list when claude exits)
 #        ctrl-y  copy the session id
 #        ctrl-a  toggle this folder / all projects
@@ -18,6 +22,79 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/.claude/local"
 SELF="$HERE/claude-history"
 py() { python3 -I "$HERE/sessions.py" "$@"; }
+# A view may not create tabs or type into other panes (Otty refuses both by default), and we don't
+# work around that: a waiting terminal opts in and runs claude itself. Only a session id is handed
+# over, never a command.
+STATE="$HOME/.cache/otty-session-browser/waiting"
+OTTY="${OTTY_CLI:-/Applications/Otty.app/Contents/MacOS/otty-cli}"
+valid_id() { [[ $1 =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]; }
+focus_pane() { [[ -n $1 ]] && "$OTTY" pane focus --pane "$1" >/dev/null 2>&1; }
+
+pane_exists() {  # true if the waiting terminal is still on screen somewhere
+  [[ -z $1 ]] && return 0                    # waiting in a terminal that isn't Otty
+  [[ $PANES == *"\"p_${1#p_}\""* ]]
+}
+
+pane_running() {  # SID -> pane id where that session is live
+  printf '%s' "$PANES" | python3 -I -c '
+import json, sys
+try:
+    print(next(p["id"] for p in json.load(sys.stdin)["data"] if p.get("agent_session_id") == sys.argv[1]))
+except Exception:
+    pass' "$1"
+}
+
+open_session() {  # CWD SID -> prints the header to show
+  local cwd="$1" sid="$2" f pid pane running
+  valid_id "$sid" || return 0
+  [[ -d $cwd ]] || { echo "$S_NODIR"; return 0; }
+  PANES="$("$OTTY" pane list --json 2>/dev/null)"
+  pane="$(pane_running "$sid")"
+  if [[ -n $pane ]]; then focus_pane "$pane"; echo "$S_FOCUSED"; return 0; fi
+  for f in "$STATE"/*.busy; do               # just handed over, not reported to Otty yet
+    [[ -f $f ]] || continue
+    pid="${f##*/}"; pid="${pid%.busy}"
+    { read -r running; read -r pane; } < "$f"
+    if [[ $running == "$sid" ]] && kill -0 "$pid" 2>/dev/null && pane_exists "$pane"; then
+      focus_pane "$pane"; echo "$S_FOCUSED"; return 0
+    fi
+  done
+  while IFS= read -r f; do                   # most recently idle terminal first
+    pid="${f##*/}"; pid="${pid%.ready}"
+    kill -0 "$pid" 2>/dev/null || { rm -f "$f"; continue; }
+    pane="$(cat "$f" 2>/dev/null)"
+    pane_exists "$pane" || continue
+    mv "$f" "$STATE/$pid.claimed" 2>/dev/null || continue      # atomic claim
+    printf '%s\n%s\n' "$sid" "$pane" > "$STATE/$pid.busy"
+    printf '%s\n' "$sid" > "$STATE/$pid.tmp" && mv "$STATE/$pid.tmp" "$STATE/$pid.open"
+    focus_pane "$pane"
+    echo "$S_OPENED"; return 0
+  done < <(ls -t "$STATE"/*.ready 2>/dev/null)
+  printf 'cd %s && claude --resume %s' "$(squote "$cwd")" "$sid" | pbcopy
+  echo "$S_COPIED"
+}
+
+wait_here() {
+  [[ -z $OTTY_NO_NEW_PANE ]] || { echo "$S_WAIT_PANEL"; return 1; }
+  local me="$STATE/$$" sid cwd
+  (umask 077; mkdir -p "$STATE") || return 1
+  trap 'rm -f "$STATE/$$".*' EXIT
+  trap 'exit 0' INT TERM HUP
+  while true; do
+    rm -f "$me".*
+    printf '%s\n' "$OTTY_PANE_ID" > "$me.new" && mv "$me.new" "$me.ready"
+    echo "$S_WAITING"
+    while [[ ! -f $me.open ]]; do sleep 0.3; done
+    sid="$(cat "$me.open")"; rm -f "$me.open"
+    valid_id "$sid" || continue
+    cwd="$(py cwd "$sid")"                   # resolved here, never taken from the handoff
+    [[ -n $cwd && -d $cwd ]] || { echo "$S_NODIR$cwd"; continue; }
+    trap ':' INT                             # ctrl-c belongs to claude while it runs
+    (cd "$cwd" && claude --resume "$sid")
+    trap 'exit 0' INT
+  done
+}
+
 squote() { local s=${1//\'/\'\\\'\'}; printf "'%s'" "$s"; }
 
 detect_lang() {
@@ -29,22 +106,32 @@ detect_lang() {
 set_strings() {
   if [[ $CH_LANG == zh ]]; then
     export CH_P_LOCAL='本目录> ' CH_P_ALL='全部> '
-    S_HEADER=$'⏎ 复制恢复命令  ^O 在此恢复  ^Y 复制ID\n^A 本目录/全部  ^R 刷新'
+    S_HEADER=$'⏎/双击 打开  ^O 在此恢复  ^Y 复制ID\n^A 本目录/全部  ^R 刷新'
     S_DAYS="近 %s 天  "
     S_COPIED='✓ 已复制恢复命令，到终端 ⌘V 回车即可'
     S_COPIED_ID='✓ 已复制会话 ID'
     S_NODIR='目录已不存在：'
     S_ANYKEY='按任意键返回…'
     S_NOFZF='需要 fzf：brew install fzf'
+    S_OPENED='✓ 已在终端里打开'
+    S_FOCUSED='✓ 已经开着，切过去了'
+    S_COPIED='没有待命的终端，已复制命令：⌘V 回车即可'
+    S_WAITING='● 待命中：在右边栏双击一个会话，就会在这里打开（Ctrl+C 退出）'
+    S_WAIT_PANEL='请在普通终端标签里运行 --wait，不是在边栏里。'
   else
     export CH_P_LOCAL='Here> ' CH_P_ALL='All> '
-    S_HEADER=$'⏎ copy resume cmd  ^O resume here  ^Y copy id\n^A here/all  ^R refresh'
+    S_HEADER=$'⏎/dbl-click open  ^O resume here  ^Y copy id\n^A here/all  ^R refresh'
     S_DAYS="last %sd  "
     S_COPIED='✓ Resume command copied — paste it in a terminal (⌘V, Enter)'
     S_COPIED_ID='✓ Session id copied'
     S_NODIR='Folder no longer exists: '
     S_ANYKEY='Press any key to go back…'
     S_NOFZF='fzf is required: brew install fzf'
+    S_OPENED='✓ Opened in your terminal'
+    S_FOCUSED='✓ Already open, switched to it'
+    S_COPIED='No waiting terminal, command copied: paste to run'
+    S_WAITING='● Waiting: double-click a session in the panel to open it here (Ctrl+C quits)'
+    S_WAIT_PANEL='Run --wait in an ordinary terminal tab, not in the panel.'
   fi
 }
 
@@ -56,8 +143,17 @@ case "$1" in
   __copy)   # __copy CWD ID
     printf 'cd %s && claude --resume %s' "$(squote "$2")" "$3" | pbcopy
     exit 0 ;;
-  __copyid)
-    printf '%s' "$2" | pbcopy
+  __open)   # __open CWD ID -> whole header. ALWAYS two lines: if its height changed, the rows would
+            # move between the two clicks of a double-click and the wrong session would open.
+    set_strings
+    msg="$(open_session "$2" "$3")"
+    printf '%s\n%s' "${msg:-${S_HEADER%%$'\n'*}}" "${S_HEADER##*$'\n'}"
+    exit 0 ;;
+  __copyid) # __copyid ID -> whole header (two lines, like __open)
+    set_strings
+    msg="${S_HEADER%%$'\n'*}"
+    if [[ -n $2 ]]; then printf '%s' "$2" | pbcopy; msg="$S_COPIED_ID"; fi
+    printf '%s\n%s' "$msg" "${S_HEADER##*$'\n'}"
     exit 0 ;;
   __resume) # __resume CWD ID
     set_strings
@@ -68,10 +164,11 @@ case "$1" in
     exit 0 ;;
 esac
 
-dir="" days="${CH_DAYS:-}" lang="${CH_LANG:-}"
+waiting="" dir="" days="${CH_DAYS:-}" lang="${CH_LANG:-}"
 while (( $# )); do
   case "$1" in
     --lang) lang="$2"; shift ;;
+    --wait) waiting=1 ;;
     --days) days="$2"; shift ;;
     *) if [[ -z $dir ]]; then dir="$1"; else days="$1"; fi ;;
   esac; shift
@@ -79,6 +176,7 @@ done
 case "$lang" in zh|en) ;; *) lang="$(detect_lang)" ;; esac
 export CH_LANG="$lang" CH_DIR="${dir:-$PWD}" CH_DAYS="$days"   # inherited by every __list reload
 set_strings
+if [[ -n $waiting ]]; then wait_here; exit; fi
 
 command -v fzf >/dev/null || { echo "$S_NOFZF"; read -rsn1; exit 1; }
 
@@ -95,8 +193,9 @@ while true; do
     --prompt="$prompt" --header="$header" --header-first \
     --preview="python3 -I '$HERE/sessions.py' preview {1}" \
     --preview-window='down,55%,wrap,border-top' \
-    --bind="enter:execute-silent('$SELF' __copy {2} {1})+change-header:$S_COPIED" \
-    --bind="ctrl-y:execute-silent('$SELF' __copyid {1})+change-header:$S_COPIED_ID" \
+    --bind="enter:transform-header:'$SELF' __open {2} {1}" \
+    --bind="double-click:transform-header:'$SELF' __open {2} {1}" \
+    --bind="ctrl-y:transform-header:'$SELF' __copyid {1}" \
     --bind="ctrl-o:execute('$SELF' __resume {2} {1})+reload('$SELF' __list)" \
     --bind="ctrl-r:reload('$SELF' __list)+change-header:$header" \
     --bind="ctrl-a:transform:[[ \$FZF_PROMPT == \"\$CH_P_ALL\" ]] && echo \"change-prompt(\$CH_P_LOCAL)+reload('$SELF' __list)\" || echo \"change-prompt(\$CH_P_ALL)+reload('$SELF' __list)\"" \

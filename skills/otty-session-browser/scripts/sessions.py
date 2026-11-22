@@ -10,6 +10,7 @@ Results are cached per file (keyed by mtime + size) in ~/.cache/otty-session-bro
 """
 import json
 import os
+import re
 import sys
 import time
 import unicodedata
@@ -17,7 +18,7 @@ import unicodedata
 PROJECTS = os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude")) + "/projects"
 CACHE_DIR = os.path.expanduser("~/.cache/otty-session-browser")
 CACHE = os.path.join(CACHE_DIR, "index.json")
-VERSION = 3
+VERSION = 4
 
 LANG = "zh" if os.environ.get("CH_LANG") == "zh" else "en"
 STR = {
@@ -50,7 +51,8 @@ def user_text(msg):
         content = "\n".join(parts)
     if not isinstance(content, str):
         return None
-    s = content.strip()
+    # Pasted text is still something the user sent: keep it, drop only the wrapper tags.
+    s = re.sub(r"</?pasted_content\b[^>]*>", "", content).strip()
     if not s or s.startswith("<") or s.startswith("Caveat:") or s.startswith("[Request interrupted"):
         return None  # command wrappers, system reminders, interrupts
     return s
@@ -149,7 +151,7 @@ def build_index():
             changed = True
     if changed or len(fresh) != len(cache):
         os.makedirs(CACHE_DIR, exist_ok=True)
-        tmp = CACHE + ".tmp"
+        tmp = f"{CACHE}.{os.getpid()}.tmp"  # panel and waiting terminals index concurrently
         with open(tmp, "w") as fh:
             json.dump({"version": VERSION, "files": fresh}, fh, ensure_ascii=False)
         os.replace(tmp, CACHE)
